@@ -1067,7 +1067,7 @@ async function sendToLex() {
 
   const payload = {
     voucherDate: new Date().toISOString().split('T')[0] + 'T00:00:00.000+00:00',
-    address: { contactType:'private', name: document.getElementById('custName').value || 'Kunde' },
+    address: { contactType:'private', name: document.getElementById('custName').value || 'Kunde', countryCode:'DE' },
     lineItems: items.map(it => ({
       type:'custom', name:it.name, quantity:it.qty, unitName:'Stück',
       unitPrice:{ currency:'EUR', netAmount: parseFloat((it.price/1.19).toFixed(4)), taxRatePercentage:19 },
