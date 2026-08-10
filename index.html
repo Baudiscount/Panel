@@ -1070,7 +1070,7 @@ async function sendToLex() {
     address: { contactType:'private', name: document.getElementById('custName').value || 'Kunde', countryCode:'DE' },
     lineItems: items.map(it => ({
       type:'custom', name:it.name, quantity:it.qty, unitName:'Stück',
-      unitPrice:{ currency:'EUR', netAmount: parseFloat((it.price/1.19).toFixed(4)), taxRatePercentage:19 },
+      unitPrice:{ currency:'EUR', grossAmount: parseFloat(it.price.toFixed(2)), taxRatePercentage:19 },
       discountPercentage:0
     })),
     totalPrice:{ currency:'EUR' },
