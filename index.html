@@ -431,6 +431,7 @@ table.dbtbl tr:hover td{background:rgba(255,255,255,.02)}
     <button class="btn btn-yellow" onclick="exportDB()">⬇ Export</button>
     <button class="btn btn-ghost" id="btnImport" onclick="document.getElementById('importFile').click()">⬆ Import</button>
     <input type="file" id="importFile" accept=".json" style="display:none" onchange="importDB(event)">
+    <button class="btn btn-green" id="btnLexImport" onclick="importFromLexware()">📥 Von Lexware importieren</button>
   </div>
   <div class="db-body">
     <table class="dbtbl">
@@ -1200,6 +1201,36 @@ function exportDB() {
   a.download = 'baudiscount-produkte.json';
   a.click();
   toast('⬇ Exportiert', 'ok');
+}
+
+// ── Produkte direkt aus Lexware laden (via Supabase Edge Function) ──
+async function importFromLexware() {
+  if (!sbUrl || !sbKey) { toast('❌ Supabase nicht verbunden — oben rechts einrichten', 'err'); return; }
+  const btn = document.getElementById('btnLexImport');
+  const orig = btn.innerHTML;
+  btn.innerHTML = '<span class="spinner"></span> &nbsp;Lade von Lexware...'; btn.disabled = true;
+
+  try {
+    const r = await fetch(sbUrl + '/functions/v1/lexware-articles', {
+      method: 'GET',
+      headers: { 'Authorization': 'Bearer ' + sbKey, 'apikey': sbKey }
+    });
+    const d = await r.json().catch(() => null);
+
+    if (r.ok && d && d.success) {
+      let count = 0;
+      Object.values(d.products || {}).forEach(p => { if (p.ean && p.name && p.price) { products[p.ean] = p; count++; } });
+      localStorage.setItem(K_PRODUCTS, JSON.stringify(products));
+      renderDB();
+      toast('📥 ' + count + ' Produkte aus Lexware importiert' + (d.truncated ? ' (Limit erreicht)' : ''), 'ok');
+    } else {
+      throw new Error((d && d.error) ? d.error : ('HTTP ' + r.status));
+    }
+  } catch (e) {
+    toast('❌ Lexware-Import fehlgeschlagen: ' + e.message, 'err');
+  } finally {
+    btn.innerHTML = orig; btn.disabled = false;
+  }
 }
 
 function importDB(e) {
