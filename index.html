@@ -553,8 +553,16 @@ let contacts = JSON.parse(localStorage.getItem(K_CONTACTS) || 'null') || [
   { name:'Petra Schulz',    phone:'+4917045678901' },
 ];
 
-let sbUrl    = localStorage.getItem(K_SB_URL) || '';
-let sbKey    = localStorage.getItem(K_SB_KEY) || '';
+// Der Supabase Anon Key ist bewusst NICHT geheim (er ist für den Einsatz im
+// Browser gedacht, Zugriffsrechte werden über Row Level Security geregelt).
+// Er wird hier als Standard hinterlegt, damit auch fremde Geräte (z.B. das
+// Handy eines Kunden, der auf den Bestätigungslink klickt) sofort
+// funktionieren, ohne dass dort erst "Supabase verbinden" ausgeführt werden muss.
+const DEFAULT_SB_URL = 'https://jffzbgxkoepandsnszlw.supabase.co';
+const DEFAULT_SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpmZnpiZ3hrb2VwYW5kc25zemx3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODYzODgyMzYsImV4cCI6MjEwMTk2NDIzNn0.n9kpR1v4B_50KVcMPom_jcE-gwrXOpegHfesj3iX0aI';
+
+let sbUrl    = localStorage.getItem(K_SB_URL) || DEFAULT_SB_URL;
+let sbKey    = localStorage.getItem(K_SB_KEY) || DEFAULT_SB_KEY;
 let items    = [];
 let waSent   = false;
 let approved = false;
@@ -577,8 +585,8 @@ let demoIdx = 0;
 //  INIT
 // ════════════════════════════════════════════
 window.onload = () => {
-  sbUrl = localStorage.getItem(K_SB_URL) || '';
-  sbKey = localStorage.getItem(K_SB_KEY) || '';
+  sbUrl = localStorage.getItem(K_SB_URL) || DEFAULT_SB_URL;
+  sbKey = localStorage.getItem(K_SB_KEY) || DEFAULT_SB_KEY;
   checkUrlToken(); // Must be first — may replace entire page
   document.getElementById('scanInput').addEventListener('keydown', e => { if(e.key==='Enter') doScan(); });
   document.getElementById('qtyVal').addEventListener('keydown', e => { if(e.key==='Enter') addItem(); });
@@ -942,9 +950,10 @@ async function checkUrlToken() {
   if (!token) return;
   const decision = approveToken ? 'approved' : 'rejected';
 
-  // Read SB credentials from localStorage (same browser/device)
-  const url = localStorage.getItem(K_SB_URL);
-  const key = localStorage.getItem(K_SB_KEY);
+  // Läuft evtl. auf einem fremden Gerät (Kundenhandy) ohne eigene
+  // Konfiguration — deshalb Fallback auf die eingebauten Defaults.
+  const url = localStorage.getItem(K_SB_URL) || DEFAULT_SB_URL;
+  const key = localStorage.getItem(K_SB_KEY) || DEFAULT_SB_KEY;
 
   // Show confirmation UI immediately
   document.body.innerHTML = buildApprovalPage(token, 'loading');
