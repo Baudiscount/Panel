@@ -606,6 +606,7 @@ window.onload = () => {
   updateLexBadge();
   updateWa();
   renderDB();
+  syncProductsAndContactsFromSupabase(); // zieht gemeinsame Produkt-/Kontaktliste von Supabase
   setInterval(() => {
     const n = new Date();
     document.getElementById('clk').textContent =
@@ -736,6 +737,7 @@ function saveCurrentProduct() {
 
   products[ean] = { ean, name, price, saved: new Date().toLocaleDateString('de-DE') };
   localStorage.setItem(K_PRODUCTS, JSON.stringify(products));
+  sbUpsertProducts([products[ean]]);
 
   // Update badge
   document.getElementById('hitBadge').innerHTML = '<span class="saved-badge">✓ Gespeichert</span>';
@@ -1120,6 +1122,7 @@ async function saveSbConfig() {
       updateLexBadge();
       closeSbModal();
       toast('✅ Supabase verbunden!', 'ok');
+      syncProductsAndContactsFromSupabase();
     } else {
       toast('❌ Verbindungsfehler: ' + r.status + ' — URL ve Key kontrol et', 'err');
     }
@@ -1192,6 +1195,83 @@ async function sendToLex() {
 }
 
 // ════════════════════════════════════════════
+//  SUPABASE: PRODUKTE & KONTAKTE (zentrale Synchronisierung)
+// ════════════════════════════════════════════
+// Produkte und Kontakte werden zusätzlich zu localStorage in Supabase
+// gespeichert (Tabellen "products" / "contacts" — genau wie "approvals").
+// Dadurch sehen alle Geräte (dein PC, der PC der Firma) automatisch dieselbe
+// aktuelle Liste, sobald sie das Panel öffnen — kein manuelles CSV/JSON-Hin-
+// und-Herschicken mehr nötig.
+
+function sbHeaders() {
+  return { 'apikey': sbKey, 'Authorization': 'Bearer ' + sbKey, 'Content-Type': 'application/json' };
+}
+
+async function syncProductsAndContactsFromSupabase() {
+  if (!sbUrl || !sbKey) return;
+  try {
+    const [pRes, cRes] = await Promise.all([
+      fetch(sbUrl + '/rest/v1/products?select=*', { headers: sbHeaders() }),
+      fetch(sbUrl + '/rest/v1/contacts?select=*&order=name.asc', { headers: sbHeaders() })
+    ]);
+    if (pRes.ok) {
+      const rows = await pRes.json();
+      if (Array.isArray(rows) && rows.length > 0) {
+        const merged = {};
+        rows.forEach(r => { merged[r.ean] = { ean: r.ean, name: r.name, price: Number(r.price), saved: r.saved || '' }; });
+        products = merged;
+        localStorage.setItem(K_PRODUCTS, JSON.stringify(products));
+        renderDB();
+      }
+    }
+    if (cRes.ok) {
+      const rows = await cRes.json();
+      if (Array.isArray(rows) && rows.length > 0) {
+        contacts = rows.map(r => ({ name: r.name, phone: r.phone }));
+        localStorage.setItem(K_CONTACTS, JSON.stringify(contacts));
+      }
+    }
+  } catch (e) { /* offline oder Verbindungsfehler -> lokaler Cache bleibt aktiv */ }
+}
+
+async function sbUpsertProducts(rows) {
+  if (!sbUrl || !sbKey || !rows || rows.length === 0) return;
+  const CHUNK = 500;
+  for (let i = 0; i < rows.length; i += CHUNK) {
+    const batch = rows.slice(i, i + CHUNK);
+    try {
+      await fetch(sbUrl + '/rest/v1/products', {
+        method: 'POST',
+        headers: { ...sbHeaders(), 'Prefer': 'resolution=merge-duplicates,return=minimal' },
+        body: JSON.stringify(batch)
+      });
+    } catch (e) { /* wird beim naechsten Sync nachgeholt */ }
+  }
+}
+
+async function sbDeleteProduct(ean) {
+  if (!sbUrl || !sbKey) return;
+  try {
+    await fetch(sbUrl + '/rest/v1/products?ean=eq.' + encodeURIComponent(ean), { method: 'DELETE', headers: sbHeaders() });
+  } catch (e) {}
+}
+
+async function sbUpsertContacts(rows) {
+  if (!sbUrl || !sbKey || !rows || rows.length === 0) return;
+  const CHUNK = 500;
+  for (let i = 0; i < rows.length; i += CHUNK) {
+    const batch = rows.slice(i, i + CHUNK);
+    try {
+      await fetch(sbUrl + '/rest/v1/contacts?on_conflict=phone', {
+        method: 'POST',
+        headers: { ...sbHeaders(), 'Prefer': 'resolution=merge-duplicates,return=minimal' },
+        body: JSON.stringify(batch)
+      });
+    } catch (e) { /* wird beim naechsten Sync nachgeholt */ }
+  }
+}
+
+// ════════════════════════════════════════════
 //  PRODUCT DB VIEW
 // ════════════════════════════════════════════
 function renderDB() {
@@ -1244,6 +1324,7 @@ function hideSave(ean) {
 function saveProdRow(ean) {
   products[ean].saved = new Date().toLocaleDateString('de-DE');
   localStorage.setItem(K_PRODUCTS, JSON.stringify(products));
+  sbUpsertProducts([products[ean]]);
   renderDB();
   toast('💾 ' + products[ean].name.substring(0,25) + ' aktualisiert', 'ok');
 }
@@ -1252,6 +1333,7 @@ function deleteProd(ean) {
   const name = products[ean]?.name || ean;
   delete products[ean];
   localStorage.setItem(K_PRODUCTS, JSON.stringify(products));
+  sbDeleteProduct(ean);
   renderDB();
   toast('🗑 ' + name.substring(0,25) + ' gelöscht', 'inf');
 }
@@ -1265,6 +1347,7 @@ function addProductManual() {
   if (!price||price<=0){ toast('❌ Preis fehlt', 'err'); return; }
   products[ean] = { ean, name, price, saved: new Date().toLocaleDateString('de-DE') };
   localStorage.setItem(K_PRODUCTS, JSON.stringify(products));
+  sbUpsertProducts([products[ean]]);
   document.getElementById('addEan').value   = '';
   document.getElementById('addName').value  = '';
   document.getElementById('addPrice').value = '';
@@ -1297,10 +1380,13 @@ async function importFromLexware() {
 
     if (r.ok && d && d.success) {
       let count = 0;
-      Object.values(d.products || {}).forEach(p => { if (p.ean && p.name && p.price) { products[p.ean] = p; count++; } });
+      const toUpsert = [];
+      Object.values(d.products || {}).forEach(p => { if (p.ean && p.name && p.price) { products[p.ean] = p; toUpsert.push(p); count++; } });
       localStorage.setItem(K_PRODUCTS, JSON.stringify(products));
       renderDB();
-      toast('📥 ' + count + ' Produkte aus Lexware importiert' + (d.truncated ? ' (Limit erreicht)' : ''), 'ok');
+      btn.innerHTML = '<span class="spinner"></span> &nbsp;Synchronisiere mit Supabase...';
+      await sbUpsertProducts(toUpsert);
+      toast('📥 ' + count + ' Produkte aus Lexware importiert & synchronisiert' + (d.truncated ? ' (Limit erreicht)' : ''), 'ok');
     } else {
       throw new Error((d && d.error) ? d.error : ('HTTP ' + r.status));
     }
@@ -1314,14 +1400,17 @@ async function importFromLexware() {
 function importDB(e) {
   const file = e.target.files[0]; if (!file) return;
   const reader = new FileReader();
-  reader.onload = ev => {
+  reader.onload = async ev => {
     try {
       const data = JSON.parse(ev.target.result);
       let count = 0;
-      Object.values(data).forEach(p => { if (p.ean&&p.name&&p.price) { products[p.ean]=p; count++; } });
+      const toUpsert = [];
+      Object.values(data).forEach(p => { if (p.ean&&p.name&&p.price) { products[p.ean]=p; toUpsert.push(p); count++; } });
       localStorage.setItem(K_PRODUCTS, JSON.stringify(products));
       renderDB();
-      toast('⬆ ' + count + ' Produkte importiert', 'ok');
+      toast('⬆ ' + count + ' Produkte importiert — synchronisiere...', 'inf');
+      await sbUpsertProducts(toUpsert);
+      toast('✅ ' + count + ' Produkte synchronisiert', 'ok');
     } catch { toast('❌ Ungültige JSON-Datei', 'err'); }
   };
   reader.readAsText(file);
@@ -1342,13 +1431,14 @@ function parseGermanPrice(s) {
 function importProductsCsv(e) {
   const file = e.target.files[0]; if (!file) return;
   const reader = new FileReader();
-  reader.onload = ev => {
+  reader.onload = async ev => {
     try {
       let text = new TextDecoder('utf-8').decode(new Uint8Array(ev.target.result));
       if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1); // BOM entfernen
 
       const parsed = Papa.parse(text, { header: true, delimiter: ';', skipEmptyLines: true });
       let count = 0, skipped = 0, noBarcode = 0;
+      const toUpsert = [];
 
       parsed.data.forEach((row, i) => {
         const name = (row['Bezeichnung'] || '').trim();
@@ -1368,13 +1458,17 @@ function importProductsCsv(e) {
         else if (artnr)             ean = artnr;
         else { ean = 'NB-' + i; noBarcode++; } // kein Barcode -> nur über Produkte-Liste erreichbar
 
-        products[ean] = { ean, name, price, saved: new Date().toLocaleDateString('de-DE') };
+        const prod = { ean, name, price, saved: new Date().toLocaleDateString('de-DE') };
+        products[ean] = prod;
+        toUpsert.push(prod);
         count++;
       });
 
       localStorage.setItem(K_PRODUCTS, JSON.stringify(products));
       renderDB();
-      toast('📄 ' + count + ' Produkte importiert' + (skipped ? ' (' + skipped + ' übersprungen: kein Name/Preis)' : '') + (noBarcode ? ' — ' + noBarcode + ' ohne Barcode' : ''), 'ok');
+      toast('📄 ' + count + ' Produkte importiert — synchronisiere mit Supabase...', 'inf');
+      await sbUpsertProducts(toUpsert);
+      toast('✅ ' + count + ' Produkte synchronisiert' + (skipped ? ' (' + skipped + ' übersprungen: kein Name/Preis)' : '') + (noBarcode ? ' — ' + noBarcode + ' ohne Barcode' : ''), 'ok');
     } catch (err) {
       toast('❌ CSV-Import fehlgeschlagen: ' + err.message, 'err');
     }
@@ -1415,6 +1509,7 @@ function saveContact() {
   if (!name||!phone) { toast('❌ Name und Telefon erforderlich', 'err'); return; }
   contacts.unshift({name,phone});
   localStorage.setItem(K_CONTACTS, JSON.stringify(contacts));
+  sbUpsertContacts([{name,phone}]);
   document.getElementById('ncName').value=''; document.getElementById('ncPhone').value='';
   document.getElementById('cmNewForm').classList.remove('open');
   renderContacts();
@@ -1436,7 +1531,7 @@ function normalizePhone(raw) {
 function importContactsCsv(e) {
   const file = e.target.files[0]; if (!file) return;
   const reader = new FileReader();
-  reader.onload = ev => {
+  reader.onload = async ev => {
     try {
       const text = new TextDecoder('windows-1252').decode(new Uint8Array(ev.target.result));
       const parsed = Papa.parse(text, { header: true, delimiter: ';', skipEmptyLines: true });
@@ -1468,7 +1563,9 @@ function importContactsCsv(e) {
       contacts = [...fresh, ...contacts];
       localStorage.setItem(K_CONTACTS, JSON.stringify(contacts));
       renderContacts();
-      toast('📄 ' + fresh.length + ' Kontakte importiert' + (skipped ? ' (' + skipped + ' übersprungen: kein Name/Telefon oder Duplikat)' : ''), 'ok');
+      toast('📄 ' + fresh.length + ' Kontakte importiert — synchronisiere mit Supabase...', 'inf');
+      await sbUpsertContacts(fresh);
+      toast('✅ ' + fresh.length + ' Kontakte synchronisiert' + (skipped ? ' (' + skipped + ' übersprungen: kein Name/Telefon oder Duplikat)' : ''), 'ok');
     } catch (err) {
       toast('❌ CSV-Import fehlgeschlagen: ' + err.message, 'err');
     }
