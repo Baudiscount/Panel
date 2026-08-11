@@ -1236,15 +1236,24 @@ async function syncProductsAndContactsFromSupabase() {
 
 async function sbUpsertProducts(rows) {
   if (!sbUrl || !sbKey || !rows || rows.length === 0) return;
+  // Wichtig: innerhalb EINES Batches darf derselbe EAN nicht doppelt vorkommen,
+  // sonst wirft Postgres "ON CONFLICT DO UPDATE command cannot affect row a
+  // second time" und der GESAMTE Batch schlägt fehl. Manche Lexware-Exporte
+  // enthalten doppelte Barcodes -> hier global deduplizieren (letzter gewinnt).
+  const dedup = new Map();
+  rows.forEach(r => { if (r && r.ean) dedup.set(r.ean, r); });
+  const unique = [...dedup.values()];
+
   const CHUNK = 500;
-  for (let i = 0; i < rows.length; i += CHUNK) {
-    const batch = rows.slice(i, i + CHUNK);
+  for (let i = 0; i < unique.length; i += CHUNK) {
+    const batch = unique.slice(i, i + CHUNK);
     try {
-      await fetch(sbUrl + '/rest/v1/products', {
+      const res = await fetch(sbUrl + '/rest/v1/products', {
         method: 'POST',
         headers: { ...sbHeaders(), 'Prefer': 'resolution=merge-duplicates,return=minimal' },
         body: JSON.stringify(batch)
       });
+      if (!res.ok) console.error('sbUpsertProducts batch failed:', res.status, await res.text());
     } catch (e) { /* wird beim naechsten Sync nachgeholt */ }
   }
 }
@@ -1258,15 +1267,22 @@ async function sbDeleteProduct(ean) {
 
 async function sbUpsertContacts(rows) {
   if (!sbUrl || !sbKey || !rows || rows.length === 0) return;
+  // Gleiches Problem wie bei Produkten: doppeltes Telefon im selben Batch
+  // lässt den kompletten Batch fehlschlagen -> global deduplizieren.
+  const dedup = new Map();
+  rows.forEach(r => { if (r && r.phone) dedup.set(r.phone, r); });
+  const unique = [...dedup.values()];
+
   const CHUNK = 500;
-  for (let i = 0; i < rows.length; i += CHUNK) {
-    const batch = rows.slice(i, i + CHUNK);
+  for (let i = 0; i < unique.length; i += CHUNK) {
+    const batch = unique.slice(i, i + CHUNK);
     try {
-      await fetch(sbUrl + '/rest/v1/contacts?on_conflict=phone', {
+      const res = await fetch(sbUrl + '/rest/v1/contacts?on_conflict=phone', {
         method: 'POST',
         headers: { ...sbHeaders(), 'Prefer': 'resolution=merge-duplicates,return=minimal' },
         body: JSON.stringify(batch)
       });
+      if (!res.ok) console.error('sbUpsertContacts batch failed:', res.status, await res.text());
     } catch (e) { /* wird beim naechsten Sync nachgeholt */ }
   }
 }
