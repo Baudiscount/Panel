@@ -1579,9 +1579,12 @@ function importContactsCsv(e) {
       contacts = [...fresh, ...contacts];
       localStorage.setItem(K_CONTACTS, JSON.stringify(contacts));
       renderContacts();
-      toast('📄 ' + fresh.length + ' Kontakte importiert — synchronisiere mit Supabase...', 'inf');
-      await sbUpsertContacts(fresh);
-      toast('✅ ' + fresh.length + ' Kontakte synchronisiert' + (skipped ? ' (' + skipped + ' übersprungen: kein Name/Telefon oder Duplikat)' : ''), 'ok');
+      toast('📄 ' + fresh.length + ' neue Kontakte — synchronisiere ' + contacts.length + ' mit Supabase...', 'inf');
+      // Immer die komplette aktuelle Liste senden (nicht nur "fresh"), damit
+      // Kontakte, die schon vorher lokal importiert wurden (also hier als
+      // "Duplikat" übersprungen werden), trotzdem in Supabase landen.
+      await sbUpsertContacts(contacts);
+      toast('✅ ' + contacts.length + ' Kontakte insgesamt synchronisiert' + (skipped ? ' (' + skipped + ' aus dieser Datei übersprungen: kein Name/Telefon oder Duplikat)' : ''), 'ok');
     } catch (err) {
       toast('❌ CSV-Import fehlgeschlagen: ' + err.message, 'err');
     }
