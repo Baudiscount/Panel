@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>BauDiscount</title>
 <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Barlow:wght@300;400;500;600;700&family=Barlow+Condensed:wght@500;600;700&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
 <style>
 :root {
   --bg:     #111318;
@@ -432,6 +433,8 @@ table.dbtbl tr:hover td{background:rgba(255,255,255,.02)}
     <button class="btn btn-ghost" id="btnImport" onclick="document.getElementById('importFile').click()">⬆ Import</button>
     <input type="file" id="importFile" accept=".json" style="display:none" onchange="importDB(event)">
     <button class="btn btn-green" id="btnLexImport" onclick="importFromLexware()">📥 Von Lexware importieren</button>
+    <button class="btn btn-ghost" id="btnCsvImport" onclick="document.getElementById('importCsvFile').click()">📄 CSV importieren</button>
+    <input type="file" id="importCsvFile" accept=".csv" style="display:none" onchange="importProductsCsv(event)">
   </div>
   <div class="db-body">
     <table class="dbtbl">
@@ -511,8 +514,10 @@ table.dbtbl tr:hover td{background:rgba(255,255,255,.02)}
     <div class="cm-search">
       <input class="finput" id="cmSearch" placeholder="Suchen..." oninput="renderContacts()">
     </div>
-    <div class="cm-add">
-      <button onclick="toggleNewContact()">＋ Neuen Kontakt hinzufügen</button>
+    <div class="cm-add" style="display:flex;gap:8px">
+      <button onclick="toggleNewContact()" style="flex:1">＋ Neuen Kontakt hinzufügen</button>
+      <button onclick="document.getElementById('importContactsCsvFile').click()" style="flex:1">📄 CSV importieren</button>
+      <input type="file" id="importContactsCsvFile" accept=".csv" style="display:none" onchange="importContactsCsv(event)">
     </div>
     <div class="cm-new-form" id="cmNewForm">
       <input class="finput" id="ncName" placeholder="Name">
@@ -1276,6 +1281,61 @@ function importDB(e) {
   e.target.value = '';
 }
 
+// ── Produkte aus Lexware-CSV-Export importieren
+// (Lexware → Produkte/Leistungen → Exportieren → CSV)
+// Erwartete Spalten: Artikelnummer;GTIN/EAN;Bezeichnung;Beschreibung;Notiz;Einheit;Steuerart;VK (Brutto)
+// Die Datei ist UTF-8 (mit BOM) und semikolon-getrennt. Manche Exporte
+// haben die EAN nicht in der GTIN/EAN-Spalte, sondern im Beschreibung-Feld
+// stehen — deshalb wird dort zusätzlich nach einer 8-14-stelligen Zahl gesucht.
+function parseGermanPrice(s) {
+  if (!s) return NaN;
+  return parseFloat(String(s).trim().replace(/\./g, '').replace(',', '.'));
+}
+
+function importProductsCsv(e) {
+  const file = e.target.files[0]; if (!file) return;
+  const reader = new FileReader();
+  reader.onload = ev => {
+    try {
+      let text = new TextDecoder('utf-8').decode(new Uint8Array(ev.target.result));
+      if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1); // BOM entfernen
+
+      const parsed = Papa.parse(text, { header: true, delimiter: ';', skipEmptyLines: true });
+      let count = 0, skipped = 0, noBarcode = 0;
+
+      parsed.data.forEach((row, i) => {
+        const name = (row['Bezeichnung'] || '').trim();
+        if (!name) { skipped++; return; }
+
+        const price = parseGermanPrice(row['VK (Brutto)']);
+        if (!price || isNaN(price) || price <= 0) { skipped++; return; }
+
+        const gtin = (row['GTIN/EAN'] || '').trim();
+        const besch = (row['Beschreibung'] || '').trim();
+        const artnr = (row['Artikelnummer'] || '').trim();
+        const eanRe = /^\d{8,14}$/;
+
+        let ean;
+        if (eanRe.test(gtin))       ean = gtin;
+        else if (eanRe.test(besch)) ean = besch;
+        else if (artnr)             ean = artnr;
+        else { ean = 'NB-' + i; noBarcode++; } // kein Barcode -> nur über Produkte-Liste erreichbar
+
+        products[ean] = { ean, name, price, saved: new Date().toLocaleDateString('de-DE') };
+        count++;
+      });
+
+      localStorage.setItem(K_PRODUCTS, JSON.stringify(products));
+      renderDB();
+      toast('📄 ' + count + ' Produkte importiert' + (skipped ? ' (' + skipped + ' übersprungen: kein Name/Preis)' : '') + (noBarcode ? ' — ' + noBarcode + ' ohne Barcode' : ''), 'ok');
+    } catch (err) {
+      toast('❌ CSV-Import fehlgeschlagen: ' + err.message, 'err');
+    }
+  };
+  reader.readAsArrayBuffer(file);
+  e.target.value = '';
+}
+
 // ════════════════════════════════════════════
 //  CONTACTS
 // ════════════════════════════════════════════
@@ -1312,6 +1372,62 @@ function saveContact() {
   document.getElementById('cmNewForm').classList.remove('open');
   renderContacts();
   toast('✅ ' + name + ' gespeichert', 'ok');
+}
+
+// ── Kontakte aus Lexware-CSV-Export importieren
+// (Lexware → Kontakte/Kunden → Exportieren → CSV)
+// Die Datei ist ISO-8859-1/Windows-1252 kodiert und semikolon-getrennt.
+function normalizePhone(raw) {
+  let p = (raw || '').trim().replace(/[\s\-\/]/g, '');
+  if (!p) return '';
+  if (p.startsWith('00')) p = '+' + p.slice(2);
+  else if (p.startsWith('0')) p = '+49' + p.slice(1);
+  else if (!p.startsWith('+')) p = '+49' + p;
+  return p;
+}
+
+function importContactsCsv(e) {
+  const file = e.target.files[0]; if (!file) return;
+  const reader = new FileReader();
+  reader.onload = ev => {
+    try {
+      const text = new TextDecoder('windows-1252').decode(new Uint8Array(ev.target.result));
+      const parsed = Papa.parse(text, { header: true, delimiter: ';', skipEmptyLines: true });
+
+      const existingPhones = new Set(contacts.map(c => c.phone));
+      const fresh = [];
+      let skipped = 0;
+
+      parsed.data.forEach(row => {
+        const company  = (row['Firmenname'] || '').trim();
+        const vorname  = (row['Vorname'] || '').trim();
+        const nachname = (row['Nachname'] || '').trim();
+        const apVor    = (row['Ansprechpartner 1 Vorname'] || '').trim();
+        const apNach   = (row['Ansprechpartner 1 Nachname'] || '').trim();
+
+        const name = company
+          || [vorname, nachname].filter(Boolean).join(' ')
+          || [apVor, apNach].filter(Boolean).join(' ');
+        if (!name) { skipped++; return; }
+
+        const phone = normalizePhone(row['Telefon 1'] || row['Telefon 2'] || row['Ansprechpartner 1 Telefon']);
+        if (!phone) { skipped++; return; }
+
+        if (existingPhones.has(phone)) { skipped++; return; }
+        existingPhones.add(phone);
+        fresh.push({ name, phone });
+      });
+
+      contacts = [...fresh, ...contacts];
+      localStorage.setItem(K_CONTACTS, JSON.stringify(contacts));
+      renderContacts();
+      toast('📄 ' + fresh.length + ' Kontakte importiert' + (skipped ? ' (' + skipped + ' übersprungen: kein Name/Telefon oder Duplikat)' : ''), 'ok');
+    } catch (err) {
+      toast('❌ CSV-Import fehlgeschlagen: ' + err.message, 'err');
+    }
+  };
+  reader.readAsArrayBuffer(file);
+  e.target.value = '';
 }
 
 // ════════════════════════════════════════════
